@@ -1,0 +1,7 @@
+# Example only: replace path with your own labeled dataset.
+path: /absolute/path/to/gridlens_labeled_dataset
+train: images/train
+val: images/val
+names:
+  0: power_line
+  1: vegetation
