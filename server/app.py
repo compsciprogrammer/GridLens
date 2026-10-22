@@ -1,12 +1,12 @@
 """GridLens demo backend. Experimental photo screening; no verified clearance assessment."""
-import io, json, os, sqlite3, uuid
+import io, json, os, sqlite3, uuid, hashlib, secrets, hmac
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 import cv2
 import numpy as np
 from PIL import Image
-from fastapi import FastAPI, File, Form, HTTPException, UploadFile
+from fastapi import FastAPI, File, Form, HTTPException, UploadFile, Header
 from ai_engine import analyze as analyze_yolo, model_ready
 
 from fastapi.responses import FileResponse
@@ -24,13 +24,45 @@ def connect():
     c=sqlite3.connect(DB);c.row_factory=sqlite3.Row;return c
 with connect() as c:
     c.execute('''CREATE TABLE IF NOT EXISTS reports(id TEXT PRIMARY KEY, created_at TEXT, lat REAL, lon REAL, location TEXT, notes TEXT, photo TEXT, status TEXT, screening TEXT)''')
+    if 'owner_hash' not in [x[1] for x in c.execute('PRAGMA table_info(reports)')]:
+        c.execute('ALTER TABLE reports ADD COLUMN owner_hash TEXT')
 
 @app.get('/')
 def home():return FileResponse(ROOT/'static'/'index.html')
 
 @app.get('/api/reports')
 def reports():
-    with connect() as c:return [dict(x) | {'screening':json.loads(x['screening'])} for x in c.execute('SELECT * FROM reports ORDER BY created_at DESC')]
+    with connect() as c:return [dict(x) | {'screening':json.loads(x['screening'])} for x in c.execute('SELECT id,created_at,lat,lon,location,notes,photo,status,screening FROM reports ORDER BY created_at DESC')]
+
+
+def require_owner(c, report_id: str, token: Optional[str]):
+    row=c.execute('SELECT owner_hash FROM reports WHERE id=?',(report_id,)).fetchone()
+    if row is None:raise HTTPException(404,'Report not found')
+    if not row['owner_hash'] or not token or not hmac.compare_digest(row['owner_hash'],hashlib.sha256(token.encode()).hexdigest()):
+        raise HTTPException(403,'Only the original submitting device can modify this report')
+    return row
+
+@app.patch('/api/reports/{report_id}/details')
+def update_details(report_id:str,payload:dict,x_report_token:Optional[str]=Header(None)):
+    location=payload.get('location')
+    notes=payload.get('notes')
+    if not isinstance(location,str) or not isinstance(notes,str) or len(location)>250 or len(notes)>2000:
+        raise HTTPException(422,'Invalid location or notes')
+    with connect() as c:
+        require_owner(c,report_id,x_report_token)
+        c.execute('UPDATE reports SET location=?,notes=? WHERE id=?',(location,notes,report_id))
+    return {'id':report_id,'location':location,'notes':notes}
+
+@app.delete('/api/reports/{report_id}')
+def delete_report(report_id:str,x_report_token:Optional[str]=Header(None)):
+    with connect() as c:
+        require_owner(c,report_id,x_report_token)
+        row=c.execute('SELECT photo FROM reports WHERE id=?',(report_id,)).fetchone()
+        c.execute('DELETE FROM reports WHERE id=?',(report_id,))
+    for name in (row['photo'],f'{report_id}_overlay.png'):
+        if name:
+            (UPLOADS/Path(name).name).unlink(missing_ok=True)
+    return {'id':report_id,'deleted':True}
 
 @app.patch('/api/reports/{report_id}')
 def update(report_id:str,payload:dict):
@@ -87,14 +119,16 @@ async def create_report(photo:UploadFile=File(...),lat:float=Form(...),lon:float
     else:
         overlay=Image.fromarray(overlay)
     ident=uuid.uuid4().hex[:12]
+    owner_token=secrets.token_urlsafe(32)
     # Re-encode untrusted uploads instead of serving arbitrary original bytes.
     original=uploaded
     original.thumbnail((2000,2000))
     original.save(UPLOADS/f'{ident}.jpg',quality=85)
     overlay.save(UPLOADS/f'{ident}_overlay.png')
     row={'id':ident,'created_at':datetime.now(timezone.utc).isoformat(),'lat':lat,'lon':lon,'location':location,'notes':notes,'photo':f'{ident}.jpg','status':'New','screening':json.dumps(result)}
-    with connect() as c:c.execute('INSERT INTO reports VALUES (:id,:created_at,:lat,:lon,:location,:notes,:photo,:status,:screening)',row)
-    return {**row,'screening':result,'overlay_url':f'/photos/{ident}_overlay.png'}
+    with connect() as c:
+        c.execute('INSERT INTO reports(id,created_at,lat,lon,location,notes,photo,status,screening,owner_hash) VALUES (:id,:created_at,:lat,:lon,:location,:notes,:photo,:status,:screening,:owner_hash)',{**row,'owner_hash':hashlib.sha256(owner_token.encode()).hexdigest()})
+    return {**row,'screening':result,'overlay_url':f'/photos/{ident}_overlay.png','owner_token':owner_token}
 
 @app.get('/health')
 def health():return {'status':'ok','mode':'demo','ai':'disabled-free-demo' if FREE_DEMO else ('custom-yolo-segmentation' if model_ready() else 'pretrained-yoloworld-experimental')}
