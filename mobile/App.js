@@ -94,7 +94,43 @@ export default function App(){
    Alert.alert('Report received','Your observation was saved to the GridLens demo dashboard. It has not been sent to a utility.');
   }catch(e){Alert.alert('Submission failed',String(e?.message||e))}finally{setBusy(false)}
  };
- return <SafeAreaView style={s.root}><StatusBar barStyle="dark-content" backgroundColor={BG}/>
+   const saveEdit=async()=>{
+   if(!editing||busy)return;
+   setBusy(true);
+   try{
+    const res=await fetch(API_URL+'/api/reports/'+encodeURIComponent(editing.id)+'/details',{
+     method:'PATCH',headers:{'Content-Type':'application/json','X-Report-Token':editing.owner_token},
+     body:JSON.stringify({location:editLocation,notes:editNotes})
+    });
+    if(!res.ok)throw new Error('HTTP '+res.status+': '+await res.text());
+    const updated=history.map(r=>r.id===editing.id?{...r,location:editLocation,notes:editNotes}:r);
+    await AsyncStorage.setItem('gridlens_history',JSON.stringify(updated));
+    setHistory(updated);setEditing(null);
+    Alert.alert('Saved','Report updated on the central dashboard.');
+   }catch(e){Alert.alert('Edit failed',String(e.message||e))}
+   finally{setBusy(false)}
+  };
+  const deleteReport=r=>{
+   if(busy)return;
+   Alert.alert('Delete report permanently?','This removes the report from the central GridLens dashboard and cannot be undone.',[
+    {text:'Cancel',style:'cancel'},
+    {text:'Delete permanently',style:'destructive',onPress:async()=>{
+     setBusy(true);
+     try{
+      const res=await fetch(API_URL+'/api/reports/'+encodeURIComponent(r.id),{
+       method:'DELETE',headers:{'X-Report-Token':r.owner_token}
+      });
+      if(!res.ok)throw new Error('HTTP '+res.status+': '+await res.text());
+      const updated=history.filter(x=>x.id!==r.id);
+      await AsyncStorage.setItem('gridlens_history',JSON.stringify(updated));
+      setHistory(updated);setEditing(null);
+      Alert.alert('Deleted','Report permanently removed from the central dashboard.');
+     }catch(e){Alert.alert('Delete failed',String(e.message||e))}
+     finally{setBusy(false)}
+    }}
+   ]);
+  };
+  return <SafeAreaView style={s.root}><StatusBar barStyle="dark-content" backgroundColor={BG}/>
   <View style={s.emergency}><Text style={s.emergencyText}>Line down, sparking, or fire? Stay 35 feet away and call 911.</Text></View>
   <View style={s.header}><View style={s.logoDot}/><View style={s.brandStack}><Text style={s.brand}>GridLens</Text><Text style={s.tagline}>See the Risk. Protect the Grid.</Text></View><Text style={s.headerSide}>AUSTIN · DEMO</Text></View>
   <View style={s.nav}>{['Report','My reports','Heat map','More'].map(t=><TouchableOpacity key={t} accessibilityRole="tab" accessibilityState={{selected:tab===t}} onPress={()=>setTab(t)} style={[s.navItem,tab===t&&s.navActive]}><Text style={[s.navLabel,tab===t&&s.navLabelActive]}>{t}</Text></TouchableOpacity>)}</View>
